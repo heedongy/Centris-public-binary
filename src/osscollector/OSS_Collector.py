@@ -1,8 +1,8 @@
 """
 Dataset Collection Tool.
 Author:		Seunghoon Woo (seunghoonwoo@korea.ac.kr)
-Modified: 	December 16, 2020.
-Modify Name: Heedong Yang
+Modified: 	~ing
+Modify author: Heedong Yang (heedongy@korea.ac.kr)
 """
 
 import os
@@ -70,7 +70,7 @@ def hashing(repoPath, saveCodePath):
 
             if file.endswith(possible):
                 try:
-                    # Execute Ctgas command
+                    # Execute Ctags command
                     functionList = subprocess.check_output(
                         ctagsPath + ' -f - --kinds-C=* --fields=neKSt "' + filePath + '"', stderr=subprocess.STDOUT,
                         shell=True).decode()
@@ -94,6 +94,7 @@ def hashing(repoPath, saveCodePath):
                         funcBody = ""
 
                         if i != '' and len(elemList) >= 8 and func.fullmatch(elemList[3]):
+                            funcName = elemList[0]  # Extract function name
                             funcStartLine = int(number.search(elemList[4]).group(0))
                             funcEndLine = int(number.search(elemList[7]).group(0))
 
@@ -118,7 +119,7 @@ def hashing(repoPath, saveCodePath):
                             if funcHash not in resDict:
                                 resDict[funcHash] = []
 
-                            resDict[funcHash].append(storedPath)
+                            resDict[funcHash].append((storedPath, funcName))  # Save file path and function name
 
                             # Save original function body before hashing
                             if not os.path.exists(saveCodePath):
@@ -141,21 +142,18 @@ def hashing(repoPath, saveCodePath):
 
 def indexing(resDict, title, filePath):
     # For indexing each OSS
+    with open(filePath, 'w') as fres:
+        fres.write(title + '\n')
 
-    fres = open(filePath, 'w')
-    fres.write(title + '\n')
+        for hashval in resDict:
+            if hashval == '' or hashval == ' ':
+                continue
 
-    for hashval in resDict:
-        if hashval == '' or hashval == ' ':
-            continue
+            fres.write(hashval)
 
-        fres.write(hashval)
-
-        for funcPath in resDict[hashval]:
-            fres.write('\t' + funcPath)
-        fres.write('\n')
-
-    fres.close()
+            for funcPath, funcName in resDict[hashval]:
+                fres.write(f', {funcName}, {funcPath}')
+            fres.write('\n')
 
 
 def main():
@@ -184,28 +182,42 @@ def main():
                 tagCommand = "git tag"
                 tagResult = subprocess.check_output(tagCommand, stderr=subprocess.STDOUT, shell=True).decode()
 
+                branchCommand = "git branch -r"
+                branchResult = subprocess.check_output(branchCommand, stderr=subprocess.STDOUT, shell=True).decode()
+                branches = [branch.strip().split('/')[-1] for branch in branchResult.split('\n') if branch.strip()]
+
                 resDict = {}
                 fileCnt = 0
                 funcCnt = 0
                 lineCnt = 0
 
-                if tagResult == "":
-                    # No tags, only master repo
+                # Define the regex for filtering tags
+                tagPattern = re.compile(r'^(v?\d+\.\d+\.\d+|v?\d+_\d+_\d+|\d+\.\d+\.\d+|\d+_\d+_\d+)$')
+
+                tags = [tag.strip() for tag in tagResult.split('\n') if tagPattern.match(tag.strip())]
+
+                # Check if master or main branch exists and add it to tags list
+                if 'master' in branches:
+                    tags.append('master')
+                if 'main' in branches:
+                    tags.append('main')
+
+                if not tags:
+                    # No valid tags or branches, use the default cloned state
+                    print(f"No valid tags or branches found for {repoName}, using default cloned state")
                     resDict, fileCnt, funcCnt, lineCnt = hashing(clonePath + repoName,
-                                                                 os.path.join(funcCodePath, repoName, 'master'))
+                                                                 os.path.join(funcCodePath, repoName, 'default'))
                     if len(resDict) > 0:
                         if not os.path.isdir(resultPath + repoName):
                             os.mkdir(resultPath + repoName)
                         title = '\t'.join([repoName, str(fileCnt), str(funcCnt), str(lineCnt)])
-                        resultFilePath = resultPath + repoName + '/fuzzy_' + repoName + '.hidx'  # Default file name: "fuzzy_OSSname.hidx"
-
+                        resultFilePath = resultPath + repoName + '/fuzzy_default.hidx'
                         indexing(resDict, title, resultFilePath)
 
                 else:
-                    for tag in str(tagResult).split('\n'):
+                    for tag in tags:
                         # Generate function hashes for each tag (version)
-                        checkoutCommand = subprocess.check_output(f"git checkout -f {tag}", stderr=subprocess.STDOUT,
-                                                                  shell=True)
+                        checkoutCommand = subprocess.check_output(f"git checkout -f {tag}", stderr=subprocess.STDOUT, shell=True)
                         resDict, fileCnt, funcCnt, lineCnt = hashing(clonePath + repoName,
                                                                      os.path.join(funcCodePath, repoName,
                                                                                   'fuzzy_' + tag))
