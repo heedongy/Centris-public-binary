@@ -1,0 +1,11 @@
+# Mac OS tmp
+.DS_Store
+
+# OSS test data
+.src/osscollector/repo_date
+.src/osscollector/repo_funcCode
+.src/osscollector/repo_functions
+.src/osscollector/repo_src
+
+.src/osscollector/sample
+
