@@ -6,15 +6,17 @@ Modify author: Heedong Yang (heedongy@korea.ac.kr)
 """
 
 import os
-import sys
+import git
+import shutil
 import subprocess
 import re
-import tlsh  # Please intall python-tlsh
+import tlsh
+import concurrent.futures
 
 """GLOBALS"""
 
-currentPath = os.getcwd()
-gitCloneURLS = currentPath + "/sample"  # Please change to the correct file (the "sample" file contains only 10 git-clone urls)
+currentPath = "/hdd1/dataset_test"
+gitCloneURLS = os.getcwd() + "/sampletest"  # Please change to the correct file (the "sample" file contains only 10 git-clone urls)
 funcCodePath = currentPath + "/repo_funcCode/"
 clonePath = currentPath + "/repo_src/"  # Default path
 tagDatePath = currentPath + "/repo_date/"  # Default path
@@ -52,6 +54,11 @@ def normalize(string):
     return ''.join(string.replace('\n', '').replace('\r', '').replace('\t', '').replace('{', '').replace('}', '').split(
         ' ')).lower()
 
+def decode_output(output):
+    try:
+        return output.decode('utf-8')
+    except UnicodeDecodeError:
+        return output.decode('latin-1', 'ignore')
 
 def hashing(repoPath, saveCodePath):
     # This function is for hashing C/C++ functions
@@ -75,7 +82,7 @@ def hashing(repoPath, saveCodePath):
                         ctagsPath + ' -f - --kinds-C=* --fields=neKSt "' + filePath + '"', stderr=subprocess.STDOUT,
                         shell=True).decode()
 
-                    f = open(filePath, 'r', encoding="UTF-8")
+                    f = open(filePath, 'r', encoding="UTF-8", errors='ignore')
 
                     # For parsing functions
                     lines = f.readlines()
@@ -155,87 +162,90 @@ def indexing(resDict, title, filePath):
                 fres.write(f', {funcName}, {funcPath}')
             fres.write('\n')
 
+def process_repo(eachUrl):
+    os.chdir(currentPath)
+    repoName = eachUrl.split("github.com/")[1].replace(".git", "").replace("/", "@@")  # Replace '/' -> '@@' for convenience
+    print("[+] Processing", repoName)
 
-def main():
-    with open(gitCloneURLS, 'r', encoding="UTF-8") as fp:
-        funcDateDict = {}
-        lines = [l.strip('\n\r') for l in fp.readlines()]
+    try:
+        repo_dir = os.path.join(clonePath, repoName)
+        # Clone the repository
+        repo = git.Repo.clone_from(eachUrl, repo_dir)
 
-        for eachUrl in lines:
-            os.chdir(currentPath)
-            repoName = eachUrl.split("github.com/")[1].replace(".git", "").replace("/",
-                                                                                   "@@")  # Replace '/' -> '@@' for convenience
-            print("[+] Processing", repoName)
+        # Get tag dates
+        tags = repo.tags
+        with open(os.path.join(tagDatePath, repoName), 'w') as tag_date_file:
+            for tag in tags:
+                tag_date = repo.git.log(tag, n=1, format="%ai")
+                tag_date_file.write(f"{tag_date} {tag}\n")
 
-            try:
-                cloneCommand = eachUrl + ' ' + clonePath + repoName
-                cloneResult = subprocess.check_output(cloneCommand, stderr=subprocess.STDOUT, shell=True).decode()
+        branches = [branch.name for branch in repo.remote().refs]
 
-                os.chdir(clonePath + repoName)
+        resDict = {}
+        fileCnt = 0
+        funcCnt = 0
+        lineCnt = 0
 
-                dateCommand = 'git log --tags --simplify-by-decoration --pretty="format:%ai %d"'  # For storing tag dates
-                dateResult = subprocess.check_output(dateCommand, stderr=subprocess.STDOUT, shell=True).decode()
-                tagDateFile = open(tagDatePath + repoName, 'w')
-                tagDateFile.write(str(dateResult))
-                tagDateFile.close()
+        # Define the regex for filtering tags
+        tagPattern = re.compile(r'^(v?\d+\.\d+\.\d+|v?\d+_\d+_\d+|\d+\.\d+\.\d+|\d+_\d+_\d+)$')
+        valid_tags = [tag.name for tag in tags if tagPattern.match(tag.name)]
 
-                tagCommand = "git tag"
-                tagResult = subprocess.check_output(tagCommand, stderr=subprocess.STDOUT, shell=True).decode()
+        # Check if master or main branch exists and add it to tags list
+        if 'origin/master' in branches:
+            valid_tags.append('master')
+        if 'origin/main' in branches:
+            valid_tags.append('main')
 
-                branchCommand = "git branch -r"
-                branchResult = subprocess.check_output(branchCommand, stderr=subprocess.STDOUT, shell=True).decode()
-                branches = [branch.strip().split('/')[-1] for branch in branchResult.split('\n') if branch.strip()]
+        if not valid_tags:
+            # No valid tags or branches, use the default cloned state
+            print(f"No valid tags or branches found for {repoName}, using default cloned state")
+            resDict, fileCnt, funcCnt, lineCnt = hashing(repo_dir, os.path.join(funcCodePath, repoName, 'default'))
+            if len(resDict) > 0:
+                if not os.path.isdir(resultPath + repoName):
+                    os.mkdir(resultPath + repoName)
+                title = '\t'.join([repoName, str(fileCnt), str(funcCnt), str(lineCnt)])
+                resultFilePath = resultPath + repoName + '/fuzzy_default.hidx'
+                indexing(resDict, title, resultFilePath)
+        else:
+            for tag in valid_tags:
+                try:
+                    # Checkout the tag
+                    if tag in ['master', 'main']:
+                        repo.git.checkout(tag)
+                    else:
+                        repo.git.checkout(f'tags/{tag}', force=True)
+                    resDict, fileCnt, funcCnt, lineCnt = hashing(repo_dir, os.path.join(funcCodePath, repoName, f'fuzzy_{tag}'))
 
-                resDict = {}
-                fileCnt = 0
-                funcCnt = 0
-                lineCnt = 0
-
-                # Define the regex for filtering tags
-                tagPattern = re.compile(r'^(v?\d+\.\d+\.\d+|v?\d+_\d+_\d+|\d+\.\d+\.\d+|\d+_\d+_\d+)$')
-
-                tags = [tag.strip() for tag in tagResult.split('\n') if tagPattern.match(tag.strip())]
-
-                # Check if master or main branch exists and add it to tags list
-                if 'master' in branches:
-                    tags.append('master')
-                if 'main' in branches:
-                    tags.append('main')
-
-                if not tags:
-                    # No valid tags or branches, use the default cloned state
-                    print(f"No valid tags or branches found for {repoName}, using default cloned state")
-                    resDict, fileCnt, funcCnt, lineCnt = hashing(clonePath + repoName,
-                                                                 os.path.join(funcCodePath, repoName, 'default'))
                     if len(resDict) > 0:
                         if not os.path.isdir(resultPath + repoName):
                             os.mkdir(resultPath + repoName)
                         title = '\t'.join([repoName, str(fileCnt), str(funcCnt), str(lineCnt)])
-                        resultFilePath = resultPath + repoName + '/fuzzy_default.hidx'
+                        resultFilePath = resultPath + repoName + f'/fuzzy_{tag}.hidx'
                         indexing(resDict, title, resultFilePath)
+                except Exception as e:
+                    print(f"Error checking out tag {tag} for {repoName}: {e}")
 
-                else:
-                    for tag in tags:
-                        # Generate function hashes for each tag (version)
-                        checkoutCommand = subprocess.check_output(f"git checkout -f {tag}", stderr=subprocess.STDOUT, shell=True)
-                        resDict, fileCnt, funcCnt, lineCnt = hashing(clonePath + repoName,
-                                                                     os.path.join(funcCodePath, repoName,
-                                                                                  'fuzzy_' + tag))
+        # Remove the cloned repository from repo_src
+        shutil.rmtree(repo_dir)
 
-                        if len(resDict) > 0:
-                            if not os.path.isdir(resultPath + repoName):
-                                os.mkdir(resultPath + repoName)
-                            title = '\t'.join([repoName, str(fileCnt), str(funcCnt), str(lineCnt)])
-                            resultFilePath = resultPath + repoName + '/fuzzy_' + tag + '.hidx'
+    except git.exc.GitCommandError as e:
+        print("Parser Error:", e)
+    except Exception as e:
+        print("Subprocess failed", e)
 
-                            indexing(resDict, title, resultFilePath)
+def main():
+    with open(gitCloneURLS, 'r', encoding="UTF-8", errors='ignore') as fp:
+        funcDateDict = {}
+        lines = [l.strip('\n\r') for l in fp.readlines()]
 
-            except subprocess.CalledProcessError as e:
-                print("Parser Error:", e)
-                continue
+    # Use ThreadPoolExecutor to process repositories in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(process_repo, eachUrl) for eachUrl in lines]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
             except Exception as e:
-                print("Subprocess failed", e)
-                continue
+                print(f"An error occurred: {e}")
 
 
 """ EXECUTE """
